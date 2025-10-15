@@ -89,7 +89,7 @@ async def paid_check(c: CallbackQuery):
         "Пусть практика мягко ведёт тебя 🌸"
     )
     await c.answer()
-
+print("AWAIKING BOT starting…")
 if __name__ == "__main__":
     import asyncio
-    dp.run_polling(bot)
+    asyncio.run(dp.start_polling(bot))
