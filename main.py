@@ -11,7 +11,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID")  # пример: @istinnayya
 YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/")
 DOC_URL = os.getenv("DOC_URL", "https://tilda.cc/")           # страница С PDF на Тильде
-TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL", "https://tilda.cc/")  # страница с видео на Тильде
+TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL", "http://project16434036.tilda.ws/")  # страница с видео на Тильде
 TILDA_PAGE_PASSWORD = os.getenv("TILDA_PAGE_PASSWORD", "")    # если нет пароля — оставь пусто
 
 bot = Bot(BOT_TOKEN)
