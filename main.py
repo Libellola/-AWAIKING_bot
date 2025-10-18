@@ -9,10 +9,9 @@ from aiogram.enums.chat_member_status import ChatMemberStatus
 # ========= ENV =========
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID")  # пример: @istinnayya
-YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/")
-DOC_URL = os.getenv("DOC_URL", "https://tilda.cc/")           # страница С PDF на Тильде
-TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL", "http://project16434036.tilda.ws/")  # страница с видео на Тильде
-TILDA_PAGE_PASSWORD = os.getenv("TILDA_PAGE_PASSWORD", "")    # если нет пароля — оставь пусто
+YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/")  # позже подставишь свою оплату
+TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL", "https://tilda.cc/")   # страница с материалами
+TILDA_PAGE_PASSWORD = os.getenv("TILDA_PAGE_PASSWORD", "")          # пароль к странице (если есть)
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -124,18 +123,24 @@ async def on_check_sub(c: CallbackQuery):
         )
     await c.answer()
 
-# 4) «Я оплатила» -> выдаём доступы
+# 4) «Я оплатила» -> выдаём доступ одной кнопкой, без web-preview
 @dp.callback_query(F.data == "paid_check")
 async def on_paid(c: CallbackQuery):
     PURCHASED.add(c.from_user.id)
-    parts = [
-        "✨ Благодарю за доверие!\n",
-        f"🎥 Видео (на странице):\n{TILDA_PAGE_URL}\n"
-    ]
-    if TILDA_PAGE_PASSWORD:
-        parts.append(f"Пароль к странице: {TILDA_PAGE_PASSWORD}\n")
-    parts.append(f"\n📘 Гайд (страница с PDF):\n{DOC_URL}\n\nПусть практика мягко ведёт тебя 🌸")
-    await c.message.edit_text("".join(parts))
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎥 Открыть страницу с материалами", url=TILDA_PAGE_URL)
+    kb.adjust(1)
+
+    pwd_line = f"\nПароль к странице: {TILDA_PAGE_PASSWORD}" if TILDA_PAGE_PASSWORD else ""
+
+    await c.message.edit_text(
+        "✨ Благодарю за доверие!\n\n"
+        "Нажми кнопку ниже, чтобы открыть доступ." + pwd_line +
+        "\n\nПусть практика мягко ведёт тебя 🌸",
+        reply_markup=kb.as_markup(),
+        disable_web_page_preview=True  # 🔒 без огромной превью-карточки
+    )
     await c.answer()
 
 print("AWAIKING BOT starting…")
