@@ -9,7 +9,7 @@ from aiogram.enums.chat_member_status import ChatMemberStatus
 # ========= ENV =========
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID")  # пример: @istinnayya
-YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/")  # ← сюда позже поставишь свою ссылку оплаты
+YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/my/i/aPTmMkN3G-E0/l")  # ← сюда позже поставишь свою ссылку оплаты
 # если в ENV не задано — берём твой текущий адрес страницы на Тильде
 TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL", "http://project16434036.tilda.ws")
 
