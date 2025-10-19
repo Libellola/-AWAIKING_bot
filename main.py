@@ -7,7 +7,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums.chat_member_status import ChatMemberStatus
 
 # ==== ЮKassa SDK ====
-from youkassa import Configuration, Payment
+from yookassa import Configuration, Payment
+
 
 # ========= ENV =========
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
