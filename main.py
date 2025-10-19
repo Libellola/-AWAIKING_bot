@@ -9,15 +9,32 @@ from aiogram.enums.chat_member_status import ChatMemberStatus
 # ========= ENV =========
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID")  # пример: @istinnayya
-YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/")  # позже подставишь свою оплату
-TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL", "https://tilda.cc/")   # страница с материалами
-TILDA_PAGE_PASSWORD = os.getenv("TILDA_PAGE_PASSWORD", "")          # пароль к странице (если есть)
+YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/")  # ← сюда позже поставишь свою ссылку оплаты
+# если в ENV не задано — берём твой текущий адрес страницы на Тильде
+TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL", "http://project16434036.tilda.ws")
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 # кто подтвердил оплату — чтобы не слал напоминание
 PURCHASED: set[int] = set()
+
+# храним, в какую «ветку/продукт» попал пользователь (по deep-link)
+SESSIONS: dict[int, str] = {}
+
+# ========= ОПРЕДЕЛЕНИЕ ПРОДУКТОВ/ВЕТОК =========
+# ключ — это слово в deep-link после ?start=
+PRODUCTS = {
+    "KLYUCH": {
+        "title": "Ветка «КЛЮЧ»",
+        "tilda_url": TILDA_PAGE_URL,
+        "price_rub": 568,
+    },
+    # сюда легко добавишь новые продукты:
+    # "SECOND": {"title": "Ветка 2", "tilda_url": "https://...", "price_rub": 990}
+}
+
+DEFAULT_PRODUCT_KEY = "KLYUCH"  # по умолчанию, если пришли без ключа
 
 # ========= ТЕКСТЫ =========
 TEXT_WELCOME = (
@@ -49,11 +66,10 @@ TEXT_REMINDER = (
     "Ты до сих пор не забрала продукты, которые реально и быстро дают рабочие инструменты для управления твоей жизнью? "
     "То, что я отдаю тебе за 568 руб., на самом деле стоит в десятки раз больше, а главное — никто этого не даёт.\n\n"
     "Я отдаю тебе:\n"
-    "• Технику активации торсионных полей сердца — сразу меняет энергию и облегчает путь к желаемому.\n"
-    "• Практику дыхания «Шамана» — очищает поле от блоков и «мусора», повышает чувствительность и интуицию.\n"
-    "• Практическое руководство к врождённым механизмам управления своим квантовым полем — задаёшь задачу подсознанию, и оно создаёт событие.\n\n"
-    "Это не магия и не чудеса — это наука квантовых полей человека. Это работает.\n\n"
-    "Жми на кнопку и забирай продукт."
+    "• Техника активации торсионных полей сердца.\n"
+    "• Практика дыхания «Шамана».\n"
+    "• Практическое руководство к врождённым механизмам управления квантовым полем.\n\n"
+    "Это не магия — это работает. Жми «Купить»."
 )
 
 # ========= КЛАВИАТУРЫ =========
@@ -70,27 +86,64 @@ def kb_sub():
     kb.adjust(1)
     return kb.as_markup()
 
-def kb_buy():
+def kb_buy(price: int, pay_url: str):
     kb = InlineKeyboardBuilder()
-    kb.button(text="💳 Купить — 568₽", url=YOOKASSA_LINK)
+    kb.button(text=f"💳 Купить — {price}₽", url=pay_url)
     kb.button(text="✅ Я оплатила", callback_data="paid_check")
     return kb.as_markup()
 
-# ========= ЛОГИКА ПРОГРЕВА =========
-async def schedule_reminder(chat_id: int):
+def kb_access(tilda_url: str):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎥 Открыть страницу с материалами", url=tilda_url)
+    kb.adjust(1)
+    return kb.as_markup()
+
+# ========= УТИЛИТЫ =========
+def parse_start_payload(text: str | None) -> str | None:
+    """
+    Возвращает payload из /start payload
+    """
+    if not text:
+        return None
+    # варианты: "/start", "/start KLYUCH", "/startKLYUCH" (на всякий)
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) == 2 and parts[0].startswith("/start"):
+        return parts[1]
+    if text.startswith("/start") and len(text) > 6:
+        return text[6:]
+    return None
+
+async def schedule_reminder(chat_id: int, product_key: str):
     await asyncio.sleep(60 * 60)  # 1 час
     if chat_id not in PURCHASED:
+        product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
         try:
-            await bot.send_message(chat_id, TEXT_REMINDER, reply_markup=kb_buy())
+            await bot.send_message(chat_id, TEXT_REMINDER, reply_markup=kb_buy(product["price_rub"], YOOKASSA_LINK))
         except Exception:
             pass
 
-# 1) /start -> длинное приветствие + «ХОЧУ»
+async def send_access(chat_id: int, product_key: str):
+    product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
+    await bot.send_message(
+        chat_id,
+        "✨ Благодарю за доверие!\n\n"
+        "Нажми кнопку ниже, чтобы открыть доступ.\n\n"
+        "Пусть практика мягко ведёт тебя 🌸",
+        reply_markup=kb_access(product["tilda_url"]),
+        disable_web_page_preview=True
+    )
+
+# ========= ХЭНДЛЕРЫ =========
 @dp.message(CommandStart())
 async def on_start(m: Message):
+    # читаем payload из deep-link (?start=KLYUCH)
+    payload = parse_start_payload(m.text)
+    key = (payload or DEFAULT_PRODUCT_KEY).upper()
+    if key not in PRODUCTS:
+        key = DEFAULT_PRODUCT_KEY
+    SESSIONS[m.chat.id] = key
     await m.answer(TEXT_WELCOME, reply_markup=kb_want())
 
-# 2) «ХОЧУ» -> блок подписки (подписаться/проверить)
 @dp.callback_query(F.data == "want")
 async def on_want(c: CallbackQuery):
     await c.message.edit_text(
@@ -99,7 +152,6 @@ async def on_want(c: CallbackQuery):
     )
     await c.answer()
 
-# 3) Проверка подписки -> оффер + «Купить 568₽» + запуск таймера напоминания
 @dp.callback_query(F.data == "check_sub")
 async def on_check_sub(c: CallbackQuery):
     ok = False
@@ -114,8 +166,10 @@ async def on_check_sub(c: CallbackQuery):
         ok = False
 
     if ok:
-        await c.message.edit_text(TEXT_OFFER, reply_markup=kb_buy())
-        asyncio.create_task(schedule_reminder(c.from_user.id))
+        product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
+        product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
+        await c.message.edit_text(TEXT_OFFER, reply_markup=kb_buy(product["price_rub"], YOOKASSA_LINK))
+        asyncio.create_task(schedule_reminder(c.from_user.id, product_key))
     else:
         await c.message.edit_text(
             "Похоже, подписки пока нет 🤍\nНажми «💫 Подписаться на канал», затем «✅ Проверить подписку».",
@@ -123,27 +177,25 @@ async def on_check_sub(c: CallbackQuery):
         )
     await c.answer()
 
-# 4) «Я оплатила» -> выдаём доступ одной кнопкой, без web-preview
 @dp.callback_query(F.data == "paid_check")
 async def on_paid(c: CallbackQuery):
     PURCHASED.add(c.from_user.id)
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🎥 Открыть страницу с материалами", url=TILDA_PAGE_URL)
-    kb.adjust(1)
-
-    pwd_line = f"\nПароль к странице: {TILDA_PAGE_PASSWORD}" if TILDA_PAGE_PASSWORD else ""
-
-    await c.message.edit_text(
-        "✨ Благодарю за доверие!\n\n"
-        "Нажми кнопку ниже, чтобы открыть доступ." + pwd_line +
-        "\n\nПусть практика мягко ведёт тебя 🌸",
-        reply_markup=kb.as_markup(),
-        disable_web_page_preview=True  # 🔒 без огромной превью-карточки
-    )
     await c.answer()
+    try:
+        await c.message.delete()  # очищаем экран «покупки»
+    except Exception:
+        pass
+    product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
+    await send_access(c.from_user.id, product_key)
+
+# запасной случай — если человек потерял финальное сообщение
+@dp.message(F.text.regexp(r"^/access($|\s)"))
+async def on_access(m: Message):
+    product_key = SESSIONS.get(m.chat.id, DEFAULT_PRODUCT_KEY)
+    await send_access(m.chat.id, product_key)
 
 print("AWAIKING BOT starting…")
 if __name__ == "__main__":
     asyncio.run(dp.start_polling(bot))
+
 
