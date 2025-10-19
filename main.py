@@ -6,12 +6,19 @@ from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums.chat_member_status import ChatMemberStatus
 
+# ==== ЮKassa SDK ====
+from youkassa import Configuration, Payment
+
 # ========= ENV =========
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID")  # пример: @istinnayya
-YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/my/i/aPTmMkN3G-E0/l")  # ← твоя ссылка на оплату
-# если в ENV не задано — берём твой текущий адрес страницы на Тильде
-TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL", "http://project16434036.tilda.ws")
+CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID")              # пример: @istinnayya или -100...
+TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL")            # закрытая страница с материалами
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")        # из личного кабинета ЮKassa
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")  # из личного кабинета ЮKassa
+
+# Настройка ЮKassa SDK
+Configuration.account_id = YOOKASSA_SHOP_ID
+Configuration.secret_key = YOOKASSA_SECRET_KEY
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -22,19 +29,21 @@ PURCHASED: set[int] = set()
 # храним, в какую «ветку/продукт» попал пользователь (по deep-link)
 SESSIONS: dict[int, str] = {}
 
+# хранение созданных платежей для проверки статуса
+PAYMENTS: dict[int, str] = {}   # user_id -> payment_id
+
 # ========= ОПРЕДЕЛЕНИЕ ПРОДУКТОВ/ВЕТОК =========
-# ключ — это слово в deep-link после ?start=
 PRODUCTS = {
     "KLYUCH": {
         "title": "Ветка «КЛЮЧ»",
         "tilda_url": TILDA_PAGE_URL,
         "price_rub": 568,
+        "description": "Материалы по программе «КЛЮЧ»"
     },
-    # сюда легко добавишь новые продукты:
-    # "SECOND": {"title": "Ветка 2", "tilda_url": "https://...", "price_rub": 990}
+    # можно добавлять новые продукты вот так:
+    # "SECOND": {"title": "Ветка 2", "tilda_url": "https://...", "price_rub": 990, "description": "..."}
 }
-
-DEFAULT_PRODUCT_KEY = "KLYUCH"  # по умолчанию, если пришли без ключа
+DEFAULT_PRODUCT_KEY = "KLYUCH"
 
 # ========= ТЕКСТЫ =========
 TEXT_WELCOME = (
@@ -58,7 +67,7 @@ TEXT_OFFER = (
     "Чем меньше страхов — тем меньше сомнений, перепадов настроения, нервов, претензий и тревожности. "
     "Есть полное понимание, что у нас есть инструменты и чёткая инструкция, которая работает.\n\n"
     "Если ты готова узнать, как просто ты сможешь каждый день делать новые шаги, жми на кнопку ниже — и я дам тебе инструкцию. "
-    "Это то, что я собирала годами; сейчас — всего за 568 руб.\n\n"
+    f"Это то, что я собирала годами; сейчас — всего за {PRODUCTS[DEFAULT_PRODUCT_KEY]['price_rub']} руб.\n\n"
     "Используй эти инструменты и инструкции — и ты удивишься, с какой скоростью начнут происходить чудеса."
 )
 
@@ -70,6 +79,11 @@ TEXT_REMINDER = (
     "• Практика дыхания «Шамана».\n"
     "• Практическое руководство к врождённым механизмам управления квантовым полем.\n\n"
     "Это не магия — это работает. Жми «Купить»."
+)
+
+TEXT_PAY_FIRST = (
+    "🔒 Доступ выдаётся **только после успешной оплаты**. "
+    "Пожалуйста, оплати по ссылке и затем нажми «✅ Я оплатила»."
 )
 
 # ========= КЛАВИАТУРЫ =========
@@ -86,11 +100,11 @@ def kb_sub():
     kb.adjust(1)
     return kb.as_markup()
 
-def kb_buy(price: int, pay_url: str):
+def kb_buy():
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"💳 Купить — {price}₽", url=pay_url)
+    kb.button(text="💳 Купить", callback_data="buy")
     kb.button(text="✅ Я оплатила", callback_data="paid_check")
-    kb.adjust(1)  # ← чтобы кнопки шли в столбик
+    kb.adjust(1)
     return kb.as_markup()
 
 def kb_access(tilda_url: str):
@@ -101,12 +115,8 @@ def kb_access(tilda_url: str):
 
 # ========= УТИЛИТЫ =========
 def parse_start_payload(text: str | None) -> str | None:
-    """
-    Возвращает payload из /start payload
-    """
     if not text:
         return None
-    # варианты: "/start", "/start KLYUCH", "/startKLYUCH" (на всякий)
     parts = text.strip().split(maxsplit=1)
     if len(parts) == 2 and parts[0].startswith("/start"):
         return parts[1]
@@ -117,11 +127,55 @@ def parse_start_payload(text: str | None) -> str | None:
 async def schedule_reminder(chat_id: int, product_key: str):
     await asyncio.sleep(60 * 60)  # 1 час
     if chat_id not in PURCHASED:
-        product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
         try:
-            await bot.send_message(chat_id, TEXT_REMINDER, reply_markup=kb_buy(product["price_rub"], YOOKASSA_LINK))
+            await bot.send_message(chat_id, TEXT_REMINDER, reply_markup=kb_buy())
         except Exception:
             pass
+
+def to_rub_cents(amount_rub: int) -> int:
+    return int(amount_rub) * 100
+
+def create_payment(user_id: int, product_key: str) -> str:
+    """
+    Создаёт платёж в ЮKassa и возвращает confirmation_url.
+    Также сохраняет payment_id в PAYMENTS[user_id].
+    """
+    product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
+    amount = product["price_rub"]
+
+    # Описание попадает в чек/кабинет ЮKassa
+    description = product.get("description") or product["title"]
+
+    # Создаём платёж
+    payment = Payment.create({
+        "amount": {
+            "value": f"{amount}.00",
+            "currency": "RUB"
+        },
+        "capture": True,  # автоматическое списание после подтверждения
+        "confirmation": {
+            "type": "redirect",
+            # можно указать return_url на твою страницу «спасибо», но это не обязательно
+        },
+        "description": f"{description} (user_id={user_id})",
+        "metadata": {
+            "user_id": user_id,
+            "product_key": product_key
+        }
+    })
+
+    PAYMENTS[user_id] = payment.id
+    return payment.confirmation.confirmation_url
+
+def check_payment_succeeded(user_id: int) -> bool:
+    """
+    Возвращает True, если последний платёж пользователя успешно оплачен.
+    """
+    payment_id = PAYMENTS.get(user_id)
+    if not payment_id:
+        return False
+    payment = Payment.find_one(payment_id)
+    return payment.status == "succeeded"
 
 async def send_access(chat_id: int, product_key: str):
     product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
@@ -137,7 +191,6 @@ async def send_access(chat_id: int, product_key: str):
 # ========= ХЭНДЛЕРЫ =========
 @dp.message(CommandStart())
 async def on_start(m: Message):
-    # читаем payload из deep-link (?start=KLYUCH)
     payload = parse_start_payload(m.text)
     key = (payload or DEFAULT_PRODUCT_KEY).upper()
     if key not in PRODUCTS:
@@ -167,9 +220,8 @@ async def on_check_sub(c: CallbackQuery):
         ok = False
 
     if ok:
+        await c.message.edit_text(TEXT_OFFER, reply_markup=kb_buy())
         product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
-        product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
-        await c.message.edit_text(TEXT_OFFER, reply_markup=kb_buy(product["price_rub"], YOOKASSA_LINK))
         asyncio.create_task(schedule_reminder(c.from_user.id, product_key))
     else:
         await c.message.edit_text(
@@ -178,16 +230,59 @@ async def on_check_sub(c: CallbackQuery):
         )
     await c.answer()
 
-@dp.callback_query(F.data == "paid_check")
-async def on_paid(c: CallbackQuery):
-    PURCHASED.add(c.from_user.id)
-    await c.answer()
-    try:
-        await c.message.delete()  # очищаем экран «покупки»
-    except Exception:
-        pass
+@dp.callback_query(F.data == "buy")
+async def on_buy(c: CallbackQuery):
     product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
-    await send_access(c.from_user.id, product_key)
+    try:
+        pay_url = create_payment(c.from_user.id, product_key)
+        await c.message.edit_text(
+            f"К оплате: {PRODUCTS[product_key]['price_rub']} ₽\n\n"
+            "Открой ссылку для оплаты и после успешной оплаты вернись и нажми «✅ Я оплатила».",
+            reply_markup=InlineKeyboardBuilder()
+                .button(text="💳 Перейти к оплате", url=pay_url).as_markup()
+        )
+    except Exception as e:
+        await c.message.answer("Что-то пошло не так при создании платежа. Попробуй ещё раз позже.")
+    await c.answer()
+
+@dp.callback_query(F.data == "paid_check")
+async def on_paid_check(c: CallbackQuery):
+    # проверяем статус последнего платежа пользователя
+    if check_payment_succeeded(c.from_user.id):
+        PURCHASED.add(c.from_user.id)
+        try:
+            await c.message.delete()
+        except Exception:
+            pass
+        product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
+        await send_access(c.from_user.id, product_key)
+    else:
+        # не оплачен: даём подсказку и снова даём кнопку «Перейти к оплате», если платеж ещё существует
+        product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
+        payment_id = PAYMENTS.get(c.from_user.id)
+        try:
+            if payment_id:
+                payment = Payment.find_one(payment_id)
+                if payment and payment.confirmation and payment.confirmation.confirmation_url:
+                    pay_url = payment.confirmation.confirmation_url
+                else:
+                    pay_url = create_payment(c.from_user.id, product_key)
+            else:
+                pay_url = create_payment(c.from_user.id, product_key)
+        except Exception:
+            pay_url = None
+
+        kb = InlineKeyboardBuilder()
+        if pay_url:
+            kb.button(text="💳 Перейти к оплате", url=pay_url)
+        kb.button(text="✅ Я оплатила", callback_data="paid_check")
+
+        await c.message.edit_text(
+            f"{TEXT_PAY_FIRST}\n\n"
+            "Если уже оплатила, дай системе 10–30 секунд и нажми «✅ Я оплатила» ещё раз.",
+            reply_markup=kb.as_markup()
+        )
+    await c.answer()
 
 # запасной случай — если человек потерял финальное сообщение
 @dp.message(F.text.regexp(r"^/access($|\s)"))
@@ -195,9 +290,10 @@ async def on_access(m: Message):
     product_key = SESSIONS.get(m.chat.id, DEFAULT_PRODUCT_KEY)
     await send_access(m.chat.id, product_key)
 
-print("AWAIKING BOT starting…")
+print("AWAIKING BOT starting… (smart YooKassa)")
 if __name__ == "__main__":
     asyncio.run(dp.start_polling(bot))
+
 
 
 
