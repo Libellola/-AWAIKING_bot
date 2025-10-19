@@ -9,7 +9,7 @@ from aiogram.enums.chat_member_status import ChatMemberStatus
 # ========= ENV =========
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID")  # пример: @istinnayya
-YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/my/i/aPTmMkN3G-E0/l")  # ← сюда позже поставишь свою ссылку оплаты
+YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/my/i/aPTmMkN3G-E0/l")  # ← твоя ссылка на оплату
 # если в ENV не задано — берём твой текущий адрес страницы на Тильде
 TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL", "http://project16434036.tilda.ws")
 
@@ -90,6 +90,7 @@ def kb_buy(price: int, pay_url: str):
     kb = InlineKeyboardBuilder()
     kb.button(text=f"💳 Купить — {price}₽", url=pay_url)
     kb.button(text="✅ Я оплатила", callback_data="paid_check")
+    kb.adjust(1)  # ← чтобы кнопки шли в столбик
     return kb.as_markup()
 
 def kb_access(tilda_url: str):
@@ -197,5 +198,6 @@ async def on_access(m: Message):
 print("AWAIKING BOT starting…")
 if __name__ == "__main__":
     asyncio.run(dp.start_polling(bot))
+
 
 
