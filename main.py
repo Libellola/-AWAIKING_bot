@@ -14,12 +14,21 @@ from yookassa import Configuration, Payment
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID")              # пример: @istinnayya или -100...
 TILDA_PAGE_URL = os.getenv("TILDA_PAGE_URL")            # закрытая страница с материалами
-YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")        # из личного кабинета ЮKassa
-YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")  # из личного кабинета ЮKassa
 
-# Настройка ЮKassa SDK
-Configuration.account_id = YOOKASSA_SHOP_ID
-Configuration.secret_key = YOOKASSA_SECRET_KEY
+# --- ключи API ЮKassa (для умной оплаты через API) ---
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")        # Идентификатор магазина (цифры)
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")  # Секретный ключ
+
+# --- резервная платёжная ссылка (если API вдруг не сработал) ---
+YOOKASSA_LINK = os.getenv("YOOKASSA_LINK", "https://yookassa.ru/my/i/aPTmMkN3G-E0/l")
+
+# Настройка ЮKassa SDK (если ключей нет, API-платёж не будет использоваться)
+if YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY:
+    Configuration.account_id = YOOKASSA_SHOP_ID
+    Configuration.secret_key = YOOKASSA_SECRET_KEY
+    USE_YOOKASSA_API = True
+else:
+    USE_YOOKASSA_API = False
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -30,7 +39,7 @@ PURCHASED: set[int] = set()
 # храним, в какую «ветку/продукт» попал пользователь (по deep-link)
 SESSIONS: dict[int, str] = {}
 
-# хранение созданных платежей для проверки статуса
+# хранение созданных платежей (для проверки статуса)
 PAYMENTS: dict[int, str] = {}   # user_id -> payment_id
 
 # ========= ОПРЕДЕЛЕНИЕ ПРОДУКТОВ/ВЕТОК =========
@@ -41,7 +50,7 @@ PRODUCTS = {
         "price_rub": 568,
         "description": "Материалы по программе «КЛЮЧ»"
     },
-    # можно добавлять новые продукты вот так:
+    # Добавлять новые ветки просто:
     # "SECOND": {"title": "Ветка 2", "tilda_url": "https://...", "price_rub": 990, "description": "..."}
 }
 DEFAULT_PRODUCT_KEY = "KLYUCH"
@@ -67,7 +76,7 @@ TEXT_OFFER = (
     "и так же делают мои ученики и клиенты.\n\n"
     "Чем меньше страхов — тем меньше сомнений, перепадов настроения, нервов, претензий и тревожности. "
     "Есть полное понимание, что у нас есть инструменты и чёткая инструкция, которая работает.\n\n"
-    "Если ты готова узнать, как просто ты сможешь каждый день делать новые шаги, жми на кнопку ниже — и я дам тебе инструкцию. "
+    f"Если ты готова узнать, как просто ты сможешь каждый день делать новые шаги, жми на кнопку ниже — и я дам тебе инструкцию. "
     f"Это то, что я собирала годами; сейчас — всего за {PRODUCTS[DEFAULT_PRODUCT_KEY]['price_rub']} руб.\n\n"
     "Используй эти инструменты и инструкции — и ты удивишься, с какой скоростью начнут происходить чудеса."
 )
@@ -83,7 +92,7 @@ TEXT_REMINDER = (
 )
 
 TEXT_PAY_FIRST = (
-    "🔒 Доступ выдаётся **только после успешной оплаты**. "
+    "🔒 Доступ выдаётся **только после успешной оплаты**.\n"
     "Пожалуйста, оплати по ссылке и затем нажми «✅ Я оплатила»."
 )
 
@@ -101,9 +110,12 @@ def kb_sub():
     kb.adjust(1)
     return kb.as_markup()
 
-def kb_buy():
+def kb_buy(url: str | None):
     kb = InlineKeyboardBuilder()
-    kb.button(text="💳 Купить", callback_data="buy")
+    if url:
+        kb.button(text="💳 Перейти к оплате", url=url)
+    else:
+        kb.button(text="💳 Купить", callback_data="buy")  # если URL еще не получили
     kb.button(text="✅ Я оплатила", callback_data="paid_check")
     kb.adjust(1)
     return kb.as_markup()
@@ -129,41 +141,46 @@ async def schedule_reminder(chat_id: int, product_key: str):
     await asyncio.sleep(60 * 60)  # 1 час
     if chat_id not in PURCHASED:
         try:
-            await bot.send_message(chat_id, TEXT_REMINDER, reply_markup=kb_buy())
+            # даём либо прямую ссылку на платёж (если есть), либо кнопку "Купить"
+            pay_url = None
+            if USE_YOOKASSA_API:
+                try:
+                    pay_url = create_payment(chat_id, product_key)
+                except Exception as e:
+                    print("YOOKASSA CREATE ERROR (reminder):", repr(e))
+            if not pay_url:
+                pay_url = YOOKASSA_LINK
+            await bot.send_message(chat_id, TEXT_REMINDER, reply_markup=kb_buy(pay_url))
         except Exception:
             pass
-
-def to_rub_cents(amount_rub: int) -> int:
-    return int(amount_rub) * 100
 
 def create_payment(user_id: int, product_key: str) -> str:
     """
     Создаёт платёж в ЮKassa и возвращает confirmation_url.
-    Также сохраняет payment_id в PAYMENTS[user_id].
+    Сохраняет payment_id в PAYMENTS[user_id].
     """
+    if not USE_YOOKASSA_API:
+        raise RuntimeError("YooKassa API keys are not configured")
+
     product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
     amount = product["price_rub"]
+    description = (product.get("description") or product["title"])[:128]
 
-    # Описание попадает в чек/кабинет ЮKassa
-    description = product.get("description") or product["title"]
-
-    # Создаём платёж
-    payment = Payment.create({
-        "amount": {
-            "value": f"{amount}.00",
-            "currency": "RUB"
-        },
-        "capture": True,  # автоматическое списание после подтверждения
-        "confirmation": {
-            "type": "redirect",
-            # можно указать return_url на твою страницу «спасибо», но это не обязательно
-        },
-        "description": f"{description} (user_id={user_id})",
-        "metadata": {
-            "user_id": user_id,
-            "product_key": product_key
-        }
-    })
+    try:
+        payment = Payment.create({
+            "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+            "capture": True,
+            "confirmation": {
+                "type": "redirect",
+                # можно указать return_url: на страницу “спасибо” или обратно в бота
+                # "return_url": f"https://t.me/{(await bot.me()).username}?start=paid"
+            },
+            "description": f"{description} (user_id={user_id})",
+            "metadata": {"user_id": user_id, "product_key": product_key}
+        })
+    except Exception as e:
+        print("YOOKASSA CREATE ERROR:", repr(e))
+        raise
 
     PAYMENTS[user_id] = payment.id
     return payment.confirmation.confirmation_url
@@ -175,8 +192,12 @@ def check_payment_succeeded(user_id: int) -> bool:
     payment_id = PAYMENTS.get(user_id)
     if not payment_id:
         return False
-    payment = Payment.find_one(payment_id)
-    return payment.status == "succeeded"
+    try:
+        payment = Payment.find_one(payment_id)
+        return payment.status == "succeeded"
+    except Exception as e:
+        print("YOOKASSA FIND ERROR:", repr(e))
+        return False
 
 async def send_access(chat_id: int, product_key: str):
     product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
@@ -221,8 +242,21 @@ async def on_check_sub(c: CallbackQuery):
         ok = False
 
     if ok:
-        await c.message.edit_text(TEXT_OFFER, reply_markup=kb_buy())
         product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
+
+        # пытаемся создать платёж через API
+        pay_url = None
+        if USE_YOOKASSA_API:
+            try:
+                pay_url = create_payment(c.from_user.id, product_key)
+            except Exception:
+                pay_url = None
+
+        # если API не сработал — используем резервную платёжную ссылку
+        if not pay_url:
+            pay_url = YOOKASSA_LINK
+
+        await c.message.edit_text(TEXT_OFFER, reply_markup=kb_buy(pay_url))
         asyncio.create_task(schedule_reminder(c.from_user.id, product_key))
     else:
         await c.message.edit_text(
@@ -233,23 +267,37 @@ async def on_check_sub(c: CallbackQuery):
 
 @dp.callback_query(F.data == "buy")
 async def on_buy(c: CallbackQuery):
+    # Кнопка на случай, если API-ссылка не была выдана ранее
     product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
-    try:
-        pay_url = create_payment(c.from_user.id, product_key)
-        await c.message.edit_text(
-            f"К оплате: {PRODUCTS[product_key]['price_rub']} ₽\n\n"
-            "Открой ссылку для оплаты и после успешной оплаты вернись и нажми «✅ Я оплатила».",
-            reply_markup=InlineKeyboardBuilder()
-                .button(text="💳 Перейти к оплате", url=pay_url).as_markup()
-        )
-    except Exception as e:
-        await c.message.answer("Что-то пошло не так при создании платежа. Попробуй ещё раз позже.")
+    pay_url = None
+    if USE_YOOKASSA_API:
+        try:
+            pay_url = create_payment(c.from_user.id, product_key)
+        except Exception:
+            pay_url = None
+    if not pay_url:
+        pay_url = YOOKASSA_LINK
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="💳 Перейти к оплате", url=pay_url)
+    kb.button(text="✅ Я оплатила", callback_data="paid_check")
+    kb.adjust(1)
+
+    await c.message.edit_text(
+        f"К оплате: {PRODUCTS[product_key]['price_rub']} ₽\n\n"
+        "Открой ссылку для оплаты и после успешной оплаты вернись и нажми «✅ Я оплатила».",
+        reply_markup=kb.as_markup()
+    )
     await c.answer()
 
 @dp.callback_query(F.data == "paid_check")
 async def on_paid_check(c: CallbackQuery):
-    # проверяем статус последнего платежа пользователя
-    if check_payment_succeeded(c.from_user.id):
+    # проверяем статус последнего платежа пользователя (если API используем)
+    ok = False
+    if USE_YOOKASSA_API:
+        ok = check_payment_succeeded(c.from_user.id)
+
+    if ok:
         PURCHASED.add(c.from_user.id)
         try:
             await c.message.delete()
@@ -258,29 +306,35 @@ async def on_paid_check(c: CallbackQuery):
         product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
         await send_access(c.from_user.id, product_key)
     else:
-        # не оплачен: даём подсказку и снова даём кнопку «Перейти к оплате», если платеж ещё существует
         product_key = SESSIONS.get(c.from_user.id, DEFAULT_PRODUCT_KEY)
-        payment_id = PAYMENTS.get(c.from_user.id)
-        try:
-            if payment_id:
-                payment = Payment.find_one(payment_id)
-                if payment and payment.confirmation and payment.confirmation.confirmation_url:
-                    pay_url = payment.confirmation.confirmation_url
-                else:
+        pay_url = None
+
+        if USE_YOOKASSA_API:
+            # если платежа ещё нет — создаём новый
+            pid = PAYMENTS.get(c.from_user.id)
+            if pid:
+                try:
+                    p = Payment.find_one(pid)
+                    pay_url = getattr(getattr(p, "confirmation", None), "confirmation_url", None)
+                except Exception:
+                    pay_url = None
+            if not pay_url:
+                try:
                     pay_url = create_payment(c.from_user.id, product_key)
-            else:
-                pay_url = create_payment(c.from_user.id, product_key)
-        except Exception:
-            pay_url = None
+                except Exception:
+                    pay_url = None
+
+        if not pay_url:
+            pay_url = YOOKASSA_LINK
 
         kb = InlineKeyboardBuilder()
-        if pay_url:
-            kb.button(text="💳 Перейти к оплате", url=pay_url)
+        kb.button(text="💳 Перейти к оплате", url=pay_url)
         kb.button(text="✅ Я оплатила", callback_data="paid_check")
+        kb.adjust(1)
 
         await c.message.edit_text(
             f"{TEXT_PAY_FIRST}\n\n"
-            "Если уже оплатила, дай системе 10–30 секунд и нажми «✅ Я оплатила» ещё раз.",
+            "Если уже оплатила, подожди 10–30 секунд и нажми «✅ Я оплатила» ещё раз.",
             reply_markup=kb.as_markup()
         )
     await c.answer()
@@ -294,6 +348,7 @@ async def on_access(m: Message):
 print("AWAIKING BOT starting… (smart YooKassa)")
 if __name__ == "__main__":
     asyncio.run(dp.start_polling(bot))
+
 
 
 
