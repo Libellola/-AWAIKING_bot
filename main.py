@@ -149,6 +149,20 @@ async def wait_payment_succeeded(user_id: int, retries: int = 6, delay_sec: floa
             log.warning("YooKassa find_one error: %r", e)
         await asyncio.sleep(delay_sec)
     return False
+# ========= Напоминание об оплате =========
+async def schedule_reminder(chat_id: int, product_key: str):
+    # через 1 час напомним, если пользователь ещё не оплатил
+    await asyncio.sleep(60 * 60)
+    if chat_id in PURCHASED:
+        return
+    try:
+        await bot.send_message(
+            chat_id,
+            TEXT_REMINDER,
+            reply_markup=kb_pay(create_payment(chat_id, product_key)) if USE_YOOKASSA_API else None
+        )
+    except Exception as e:
+        print("REMINDER ERROR:", repr(e))
 
 async def send_access(chat_id: int, product_key: str):
     product = PRODUCTS.get(product_key, PRODUCTS[DEFAULT_PRODUCT_KEY])
